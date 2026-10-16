@@ -11,7 +11,7 @@ Original file is located at
 Ce case study utilise la boîte à outils MDP développée à l'INRAE https://pymdptoolbox.readthedocs.io/en/latest/index.html
 """
 
-import mdptoolbox, mdptoolbox.example, mdptoolbox.util, numpy
+import mdptoolbox, numpy as np
 
 """On considère un robot ménager. Il peut se trouver soit dans le salon, soit à sa station de charge, soit être à court de batterie. Le salon peut être propre ou sale. Il y a donc cinq états : LD (dans le salon, sale), LC (dans le salon, propre), CD (au chargeur, sale), CC (au chargeur, propre), O (hors tension).
 
@@ -65,13 +65,11 @@ Interpréter et expliquer vos resultats.
 Poster votre programme ci-dessous
 """
 
-import numpy as np
-
 # Ordre des états : LD, LC, CD, CC, O
 etats = ["LD", "LC", "CD", "CC", "O"]
 actions = ["Nettoyer", "Recharger"]
 
-# Récompenses par état
+# Récompenses par état (rd < rc, costcrash <= rd)
 rc = 10
 rd = 0
 costcrash = -10
@@ -84,54 +82,50 @@ seuil = 1e-10
 
 
 def construire_matrices(e, pDust):
-    # Matrice pour l'action Nettoyer
+    # Action Nettoyer
     PN = np.zeros((5, 5))
+    PN[0] = [(1 - e) * epsilon, (1 - e) * (1 - epsilon), 0, 0, e]  # LD
+    PN[1] = [0, 1 - e, 0, 0, e]                                    # LC
+    PN[2] = [epsilon, 1 - epsilon, 0, 0, 0]  # CD -> salon (LD ou LC), pas de panne
+    PN[3] = [0, 1, 0, 0, 0]                  # CC -> salon propre (LC)
+    PN[4] = [0, 0, 0, 0, 1]                                        # O
 
-    PN[0] = [
-        (1 - e) * epsilon,
-        (1 - e) * (1 - epsilon),
-        0, 0, e
-    ]
-    PN[1] = [0, 1 - e, 0, 0, e]
-    PN[2] = [epsilon, 0, 0, 1 - epsilon, 0]
-    PN[3] = [0, 0, 0, 1, 0]
-    PN[4] = [0, 0, 0, 0, 1]
-
-    # Matrice pour l'action Recharger
+    # Action Recharger : le robot rejoint toujours la station
     PR = np.zeros((5, 5))
+    PR[0] = [0, 0, 1, 0, 0]                  # LD -> CD
+    PR[1] = [0, 0, pDust, 1 - pDust, 0]      # LC -> CD (poussière) ou CC
+    PR[2] = [0, 0, 1, 0, 0]                  # CD reste sale
+    PR[3] = [0, 0, pDust, 1 - pDust, 0]      # CC -> CD (poussière) ou CC
+    PR[4] = [0, 0, 0, 0, 1]                  # O
 
-    PR[0] = [0, 0, 1, 0, 0]
-    PR[1] = [0, 0, 0, 1, 0]
-    PR[2] = [0, 0, 1, 0, 0]
-    PR[3] = [0, 0, pDust, 1 - pDust, 0]
-    PR[4] = [0, 0, 0, 0, 1]
+    # Vérification : chaque ligne est une distribution de probabilité
+    for P in (PN, PR):
+        assert np.allclose(P.sum(axis=1), 1)
 
     return [PN, PR]
 
 
 def iteration_valeur(e, pDust):
     transitions = construire_matrices(e, pDust)
-    V = np.zeros(len(etats))
 
-    while True:
-        Q = np.zeros((len(etats), len(actions)))
+    # Utilisation de l'algorithme prédéfini de mdptoolbox
+    solveur = mdptoolbox.mdp.ValueIteration(
+        transitions,
+        recompenses,
+        gamma,
+        epsilon=seuil
+    )
 
-        for a, P in enumerate(transitions):
-            Q[:, a] = recompenses + gamma * P @ V
+    solveur.run()
 
-        V_nouveau = np.max(Q, axis=1)
+    # Récupération des résultats
+    V = np.array(solveur.V)
+    politique = np.array(solveur.policy)
 
-        if np.max(np.abs(V_nouveau - V)) < seuil:
-            V = V_nouveau
-            break
-
-        V = V_nouveau
-
-    # Recalcul des valeurs d'action avec V convergée
+    # Calcul des valeurs d'action pour conserver le même affichage
+    Q = np.zeros((len(etats), len(actions)))
     for a, P in enumerate(transitions):
         Q[:, a] = recompenses + gamma * P @ V
-
-    politique = np.argmax(Q, axis=1)
 
     return V, politique, Q
 
@@ -140,39 +134,25 @@ def afficher_resultats(nom, e, pDust):
     V, politique, Q = iteration_valeur(e, pDust)
 
     print(f"\n--- {nom} ---")
-    print(f"e = {e}, pDust = {pDust}")
+    print(f"Paramètres : e = {e}, pDust = {pDust}, epsilon = {epsilon}, "
+          f"gamma = {gamma}")
+    print(f"Récompenses : rc = {rc}, rd = {rd}, costcrash = {costcrash}")
     print("État | Valeur optimale | Action optimale")
-
     for i, etat in enumerate(etats):
-        print(
-            f"{etat:4} | {V[i]:15.4f} | "
-            f"{actions[politique[i]]}"
-        )
+        print(f"{etat:4} | {V[i]:15.4f} | {actions[politique[i]]}")
 
 
 # 1. Risque élevé de panne
-afficher_resultats(
-    "Risque de panne élevé",
-    e=0.8, pDust=0.1
-)
+afficher_resultats("1. Risque de panne élevé", e=0.8, pDust=0.1)
 
 # 2. Risque de panne faible
-afficher_resultats(
-    "Risque de panne faible",
-    e=0.001, pDust=0.1
-)
+afficher_resultats("2. Risque de panne faible", e=0.001, pDust=0.1)
 
 # 3. Batterie très fiable
-afficher_resultats(
-    "Batterie très fiable",
-    e=0.0001, pDust=0.1
-)
+afficher_resultats("3. Batterie très fiable", e=0.0001, pDust=0.1)
 
 # 4. Le salon se salit rapidement
-afficher_resultats(
-    "Poussière fréquente",
-    e=0.2, pDust=0.8
-)
+afficher_resultats("4. Poussière fréquente", e=0.2, pDust=0.8)
 
 """Bonus
 
