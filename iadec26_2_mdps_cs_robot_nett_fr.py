@@ -12,7 +12,7 @@ Ce case study utilise la boîte à outils MDP développée à l'INRAE https://py
 """
 
 import mdptoolbox, numpy as np
-
+from itertools import product
 """On considère un robot ménager. Il peut se trouver soit dans le salon, soit à sa station de charge, soit être à court de batterie. Le salon peut être propre ou sale. Il y a donc cinq états : LD (dans le salon, sale), LC (dans le salon, propre), CD (au chargeur, sale), CC (au chargeur, propre), O (hors tension).
 
 
@@ -158,3 +158,113 @@ afficher_resultats("4. Poussière fréquente", e=0.2, pDust=0.8)
 
 Ameliorez votre modèle de manière à prendre en considération plusieurs niveaux de batterie (élevé, moyen, faible  par exemple). Collez votre programme ci dessous et expliquez la politique optimale trouvee
 """
+
+niveaux = ["F", "M", "E"]        # batterie faible, moyenne, élevée
+lieux = ["L", "C"]               # L = salon, C = station de charge
+propretes = ["D", "C"]           # D = sale, C = propre
+actions = ["Nettoyer", "Recharger"]
+
+# 12 états (lieu, propreté, batterie) + l'état hors tension O
+etats = [f"{l}{p}-{niveaux[b]}" for l, p, b in product(lieux, propretes, range(3))] + ["O"]
+idx = {s: i for i, s in enumerate(etats)}
+nS = len(etats)
+
+
+def recompense(s):
+    if s == "O":
+        return costcrash
+    return rc if s[1] == "C" else rd
+
+
+R = np.array([recompense(s) for s in etats])
+
+
+def construire_matrices(q, c, pDust):
+    """
+    q     : probabilité que la batterie baisse d'un niveau en nettoyant
+    c     : probabilité que la batterie monte d'un niveau en chargeant à la station
+    pDust : probabilité que le salon propre se salisse pendant la charge
+    """
+    PN, PR = np.zeros((nS, nS)), np.zeros((nS, nS))
+    PN[idx["O"], idx["O"]] = PR[idx["O"], idx["O"]] = 1
+
+    for l, p, b in product(lieux, propretes, range(3)):
+        s = idx[f"{l}{p}-{niveaux[b]}"]
+
+        # ---------- Nettoyer ----------
+        if p == "C":
+            issues = [("C", 1.0)]                         # sol propre reste propre
+        else:
+            issues = [("C", 1 - epsilon), ("D", epsilon)] # nettoyage réussi / raté
+        for p2, pr in issues:
+            # le nettoyage consomme de la batterie, d'où qu'il parte (salon ou station)
+            if b == 0:
+                PN[s, idx["O"]] += pr * q                 # décharge à partir de F : panne
+            else:
+                PN[s, idx[f"L{p2}-{niveaux[b-1]}"]] += pr * q
+            PN[s, idx[f"L{p2}-{niveaux[b]}"]] += pr * (1 - q)
+
+        # ---------- Recharger ----------
+        poussiere = [("C", 1 - pDust), ("D", pDust)] if p == "C" else [("D", 1.0)]
+        for p2, pr in poussiere:
+            if l == "L":
+                # trajet vers la station : la batterie ne change pas
+                PR[s, idx[f"C{p2}-{niveaux[b]}"]] += pr
+            else:
+                # à la station : la batterie monte d'un niveau avec la probabilité c
+                PR[s, idx[f"C{p2}-{niveaux[min(b+1, 2)]}"]] += pr * c
+                PR[s, idx[f"C{p2}-{niveaux[b]}"]] += pr * (1 - c)
+
+    # Vérification : chaque ligne est une distribution de probabilité
+    for P in (PN, PR):
+        assert np.allclose(P.sum(axis=1), 1)
+    return [PN, PR]
+
+
+def iteration_valeur(q, c, pDust):
+    transitions = construire_matrices(q, c, pDust)
+    V = np.zeros(nS)
+
+    while True:
+        Q = np.stack([R + gamma * P @ V for P in transitions], axis=1)
+        V_nouveau = np.max(Q, axis=1)
+        if np.max(np.abs(V_nouveau - V)) < seuil:
+            V = V_nouveau
+            break
+        V = V_nouveau
+
+    Q = np.stack([R + gamma * P @ V for P in transitions], axis=1)
+    politique = np.argmax(Q, axis=1)
+    return V, politique, Q
+
+
+def afficher_resultats(nom, q, c, pDust):
+    V, politique, Q = iteration_valeur(q, c, pDust)
+
+    print(f"\n--- {nom} ---")
+    print(f"Paramètres : q = {q}, c = {c}, pDust = {pDust}, "
+          f"epsilon = {epsilon}, gamma = {gamma}")
+    print(f"Récompenses : rc = {rc}, rd = {rd}, costcrash = {costcrash}")
+    print("Politique (valeur optimale) selon la batterie F / M / E :")
+    for l, pr in product(lieux, propretes):
+        cases = []
+        for b in range(3):
+            i = idx[f"{l}{pr}-{niveaux[b]}"]
+            cases.append(f"{actions[politique[i]][:4]:4} ({V[i]:6.1f})")
+        print(f"  {l}{pr} : " + " | ".join(cases))
+
+
+# 1. Cas de référence
+afficher_resultats("1. Cas de référence", q=0.5, c=0.5, pDust=0.1)
+
+# 2. Batterie qui se décharge vite
+afficher_resultats("2. Batterie qui se décharge vite", q=0.9, c=0.5, pDust=0.1)
+
+# 3. Batterie très fiable
+afficher_resultats("3. Batterie très fiable", q=0.05, c=0.5, pDust=0.1)
+
+# 4. Charge lente
+afficher_resultats("4. Charge lente", q=0.5, c=0.15, pDust=0.1)
+
+# 5. Salon qui se salit vite
+afficher_resultats("5. Salon qui se salit vite", q=0.5, c=0.5, pDust=0.8)
